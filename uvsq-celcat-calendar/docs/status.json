@@ -1,0 +1,7 @@
+{
+  "ok": false,
+  "updated_at": "2026-09-14T00:00:00Z",
+  "event_count": 0,
+  "endpoint": "",
+  "message": "Not run yet. Run the GitHub Action once after uploading the repository."
+}
