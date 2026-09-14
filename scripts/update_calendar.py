@@ -2,6 +2,11 @@
 """
 UVSQ CELCAT -> organized iCalendar feeds.
 
+Calendar display goal:
+  TITLE    = course name only
+  LOCATION = building/site + room
+  COLOR    = class type, by subscribing to separate COURS / TD / TP / EXAM feeds
+
 Outputs:
   docs/schedule.ics  all classes
   docs/cours.ics     lectures
@@ -9,9 +14,6 @@ Outputs:
   docs/tp.ics        practicals
   docs/examens.ics   exams/tests
   docs/autres.ics    everything else
-
-Google Calendar does not reliably honor per-event colors from subscribed ICS
-files, so category-specific feeds let the user set one stable color per type.
 """
 from __future__ import annotations
 
@@ -44,51 +46,37 @@ ENDPOINT_PATHS = (
 SKIP_CATEGORIES = {"CONGES", "FERIE", "PONT", "VACANCES"}
 
 FEEDS = {
-    "all": {
-        "filename": "schedule.ics",
-        "name": "UVSQ — S5 PHYSIQUE PSC",
-        "color": "#5F6368",
-    },
-    "cours": {
-        "filename": "cours.ics",
-        "name": "UVSQ — COURS",
-        "color": "#3F51B5",
-    },
-    "td": {
-        "filename": "td.ics",
-        "name": "UVSQ — TD",
-        "color": "#039BE5",
-    },
-    "tp": {
-        "filename": "tp.ics",
-        "name": "UVSQ — TP",
-        "color": "#0B8043",
-    },
-    "examens": {
-        "filename": "examens.ics",
-        "name": "UVSQ — EXAMENS",
-        "color": "#D50000",
-    },
-    "autres": {
-        "filename": "autres.ics",
-        "name": "UVSQ — AUTRES",
-        "color": "#616161",
-    },
+    "all":      {"filename": "schedule.ics", "name": "UVSQ — S5 PHYSIQUE PSC", "color": "#5F6368"},
+    "cours":    {"filename": "cours.ics", "name": "UVSQ — COURS", "color": "#3F51B5"},
+    "td":       {"filename": "td.ics", "name": "UVSQ — TD", "color": "#039BE5"},
+    "tp":       {"filename": "tp.ics", "name": "UVSQ — TP", "color": "#0B8043"},
+    "examens":  {"filename": "examens.ics", "name": "UVSQ — EXAMENS", "color": "#D50000"},
+    "autres":   {"filename": "autres.ics", "name": "UVSQ — AUTRES", "color": "#616161"},
 }
 
 _BR_RE = re.compile(r"<br\s*/?>", re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
 
-ROOM_WORDS = re.compile(
-    r"\b(amphi|amphith[eé][aâ]tre|salle|room|local|lab(?:o|oratoire)?|"
-    r"auditorium|gymnase|studio|atelier|bureau|s[.\s-]?\d{2,4}|"
-    r"[A-Z]{1,4}[-_. ]?\d{1,4})\b",
+# Examples actually seen in UVSQ CELCAT:
+#   G209 - GERMAIN [Salle de TD]
+#   E303 - Bât Joliot-Curie
+#   AMPHI J - FERMAT (176 / 92) [Amphithéâtre]
+#   G101 - GERMAIN [CARTABLE NUMERIQUE ]
+ROOM_PREFIX_RE = re.compile(
+    r"^(?:AMPHI(?:TH[EÉ][AÂ]TRE)?\s+[A-Z0-9]+|"
+    r"SALLE\s+[A-Z0-9._-]+|"
+    r"[A-Z]{1,2}\s*[-_.]?\s*\d{1,4}[A-Z]?)$",
     re.I,
 )
-PLACE_WORDS = re.compile(
-    r"\b(campus|b[âa]t(?:iment)?|versailles|guyancourt|v[eé]lizy|"
-    r"saint[-\s]?quentin|rambouillet|mantes|universit[eé]|uvsq|"
-    r"fermat|vauban|d'alembert|d'alembert|buffon|descartes)\b",
+ROOM_TAG_RE = re.compile(
+    r"\[(?:[^\]]*(?:SALLE|AMPHI|CARTABLE|LABO|TP|TD)[^\]]*)\]",
+    re.I,
+)
+CAPACITY_RE = re.compile(r"\s*\(\s*\d+\s*/\s*\d+\s*\)\s*")
+BUILDING_WORD_RE = re.compile(
+    r"\b(B[ÂA]T(?:IMENT)?|GERMAIN|FERMAT|DESCARTES|JOLIOT[-\s]?CURIE|"
+    r"D'ALEMBERT|D’ALEMBERT|VAUBAN|BUFFON|CAMPUS|UVSQ|VERSAILLES|"
+    r"GUYANCOURT|V[EÉ]LIZY)\b",
     re.I,
 )
 
@@ -112,7 +100,7 @@ def request_json(url: str, form: dict[str, str]) -> list[dict]:
         headers={
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "User-Agent": "Mozilla/5.0 (compatible; UVSQCalendarBridge/2.0)",
+            "User-Agent": "Mozilla/5.0 (compatible; UVSQCalendarBridge/3.0)",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": url.split("/Home/")[0] + "/",
         },
@@ -181,7 +169,7 @@ def feed_key_for_category(category: str) -> str:
         return "tp"
     if re.search(r"EXAM|PARTIEL|CONTROLE|CC\b|EVALUATION", c):
         return "examens"
-    if re.search(r"COURS|CM\b", c):
+    if re.search(r"COURS|\bCM\b", c):
         return "cours"
     return "autres"
 
@@ -197,32 +185,182 @@ def category_label(category: str) -> str:
     }[key]
 
 
-def split_place_room(entry: str) -> tuple[str, str]:
-    entry = entry.strip(" -")
-    if not entry:
-        return "", ""
+def strip_room_decoration(line: str) -> str:
+    line = ROOM_TAG_RE.sub("", line)
+    line = CAPACITY_RE.sub(" ", line)
+    return re.sub(r"\s+", " ", line).strip(" -")
 
-    # CELCAT room names commonly use "site / room". Prefer the final slash as
-    # the separator so nested site names are preserved.
-    if "/" in entry:
-        left, right = entry.rsplit("/", 1)
-        return left.strip(" -"), right.strip(" -")
 
-    # Also accept "site — room" or "site - Salle 123" when the second half
-    # clearly looks like a room.
-    for sep in (" — ", " – ", " - "):
-        if sep in entry:
-            left, right = entry.rsplit(sep, 1)
-            if ROOM_WORDS.search(right):
-                return left.strip(), right.strip()
+def parse_uvsq_location(line: str) -> tuple[str, str] | None:
+    """
+    Return (place, room) if a CELCAT line looks like a UVSQ location.
 
-    if ROOM_WORDS.search(entry) and not PLACE_WORDS.search(entry):
-        return "", entry
-    if PLACE_WORDS.search(entry) and not ROOM_WORDS.search(entry):
-        return entry, ""
+    Example:
+      "AMPHI J - FERMAT (176 / 92) [Amphithéâtre]"
+        -> ("FERMAT", "AMPHI J")
+    """
+    original = line.strip()
+    cleaned = strip_room_decoration(original)
+    if not cleaned:
+        return None
 
-    # Unknown one-line CELCAT room: treat as room rather than inventing a site.
-    return "", entry
+    # Strong signal: CELCAT's [Salle ...] / [Amphithéâtre] resource tags.
+    tagged = bool(ROOM_TAG_RE.search(original))
+
+    if " - " in cleaned:
+        left, right = cleaned.split(" - ", 1)
+        left, right = left.strip(), right.strip()
+
+        left_is_room = bool(ROOM_PREFIX_RE.fullmatch(left))
+        right_is_place = bool(BUILDING_WORD_RE.search(right))
+
+        if tagged or left_is_room or right_is_place:
+            return right, left
+
+    # A standalone room such as "G209" or "AMPHI J".
+    if ROOM_PREFIX_RE.fullmatch(cleaned):
+        return "", cleaned
+
+    # A standalone building/site.
+    if BUILDING_WORD_RE.search(cleaned) and len(cleaned.split()) <= 6:
+        return cleaned, ""
+
+    return None
+
+
+def looks_like_category(line: str) -> bool:
+    u = ascii_upper(line.strip())
+    return bool(re.fullmatch(
+        r"(TD|TP|CM|COURS|EXAMEN|EXAM|PARTIEL|CONTROLE(?: CONTINU)?|CC)",
+        u,
+    ))
+
+
+def strip_course_code(line: str) -> str:
+    """
+    Turn e.g. "PHY301 - Mécanique quantique" into "Mécanique quantique",
+    while leaving ordinary names untouched.
+    """
+    s = line.strip()
+    if " - " not in s:
+        return s
+
+    left, right = s.split(" - ", 1)
+    compact = re.sub(r"[\s._-]", "", left)
+
+    # Course codes tend to be short alphanumeric identifiers.
+    if (
+        2 <= len(compact) <= 14
+        and re.fullmatch(r"[A-Za-z0-9]+", compact)
+        and any(ch.isdigit() for ch in compact)
+        and len(right.strip()) >= 4
+    ):
+        return right.strip()
+
+    return s
+
+
+def candidate_score(line: str) -> int:
+    """
+    Score a non-location CELCAT string as a probable course name.
+    """
+    s = line.strip()
+    if not s:
+        return -999
+
+    score = 0
+    letters = sum(ch.isalpha() for ch in s)
+    words = re.findall(r"[A-Za-zÀ-ÿ]+", s)
+
+    if letters >= 6:
+        score += 3
+    if len(words) >= 2:
+        score += 3
+    if len(words) >= 3:
+        score += 1
+
+    # Typical academic vocabulary gives a mild boost, but is not required.
+    if re.search(
+        r"\b(m[eé]canique|quantique|physique|math|optique|thermo|"
+        r"[eé]lectro|signal|ondes?|chimie|anglais|informatique|"
+        r"programmation|relativit[eé]|statistique|analyse|alg[eè]bre)\b",
+        s,
+        re.I,
+    ):
+        score += 4
+
+    # Things that are very unlikely to be the subject title.
+    if re.search(r"\b(S5|PSC|GROUPE|PROMO|ENSEIGNANT|PROF|M\.)\b", s, re.I):
+        score -= 3
+    if re.fullmatch(r"[A-ZÀ-Ý '-]{2,30}", s) and len(words) <= 2:
+        # Could be a person's surname/building; only a slight penalty.
+        score -= 1
+
+    return score
+
+
+def choose_course_title(event: dict, cfg: dict, lines: list[str]) -> str:
+    """
+    Prefer structured CELCAT course fields, but only when they are not actually
+    room resources. Then fall back to description lines after removing group,
+    category and location data.
+    """
+    candidates: list[tuple[int, str]] = []
+
+    # Different CELCAT deployments use different field names.
+    structured_fields = (
+        "subject",
+        "subjectName",
+        "course",
+        "courseName",
+        "activityName",
+        "eventName",
+        "moduleName",
+        "module",
+        "title",
+        "name",
+    )
+
+    for idx, key in enumerate(structured_fields):
+        value = clean_html(event.get(key, ""))
+        if not value:
+            continue
+        if "\n" in value:
+            values = value.splitlines()
+        else:
+            values = [value]
+
+        for item in values:
+            item = item.strip()
+            if not item:
+                continue
+            if item.casefold() == cfg["group"].casefold():
+                continue
+            if looks_like_category(item):
+                continue
+            if parse_uvsq_location(item):
+                continue
+            # Structured fields get a large preference.
+            candidates.append((100 - idx + candidate_score(item), item))
+
+    # Description fallback.
+    for item in lines:
+        item = item.strip()
+        if not item:
+            continue
+        if item.casefold() == cfg["group"].casefold():
+            continue
+        if looks_like_category(item):
+            continue
+        if parse_uvsq_location(item):
+            continue
+        candidates.append((candidate_score(item), item))
+
+    if not candidates:
+        return "Cours UVSQ"
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return strip_course_code(candidates[0][1])
 
 
 def unique(items: list[str]) -> list[str]:
@@ -238,86 +376,61 @@ def unique(items: list[str]) -> list[str]:
 
 def parse_event_fields(event: dict, cfg: dict) -> dict:
     category = clean_html(event.get("eventCategory", ""))
-    module = clean_html(event.get("module", ""))
     lines = clean_lines(event.get("description", ""))
 
-    # CELCAT commonly places room resources first, then groups, then module /
-    # notes, with the event category also available separately.
-    group_idx = None
-    for i, line in enumerate(lines):
-        if line.casefold() == cfg["group"].casefold():
-            group_idx = i
-            break
-
-    if group_idx is not None:
-        room_candidates = lines[:group_idx]
-        after_group = lines[group_idx + 1 :]
-    else:
-        room_candidates = []
-        after_group = lines[:]
-
-    # Remove obvious non-room metadata from the room section.
-    room_candidates = [
-        x for x in room_candidates
-        if x.casefold() != category.casefold()
-        and (not module or x.casefold() != module.casefold())
-        and x.casefold() != cfg["group"].casefold()
-    ]
-
+    # Search ALL description lines for room/building data. UVSQ does not keep
+    # the location in a consistent position relative to the group line.
     places, rooms = [], []
-    for line in room_candidates:
-        place, room = split_place_room(line)
-        if place:
-            places.append(place)
-        if room:
-            rooms.append(room)
+    location_source_lines = set()
+
+    for line in lines:
+        parsed = parse_uvsq_location(line)
+        if parsed:
+            place, room = parsed
+            if place:
+                places.append(place)
+            if room:
+                rooms.append(room)
+            location_source_lines.add(line.casefold())
+
+    # Also inspect explicit JSON location-ish fields.
+    for key in ("location", "room", "rooms"):
+        value = clean_html(event.get(key, ""))
+        for line in value.splitlines():
+            parsed = parse_uvsq_location(line)
+            if parsed:
+                place, room = parsed
+                if place:
+                    places.append(place)
+                if room:
+                    rooms.append(room)
+            elif value and not rooms:
+                # Keep an unknown explicit room field rather than discard it.
+                rooms.append(line)
 
     places = unique(places)
     rooms = unique(rooms)
 
-    # If explicit JSON location fields exist, use them as a fallback.
-    explicit_location = ""
-    for key in ("location", "room", "rooms"):
-        value = clean_html(event.get(key, ""))
-        if value:
-            explicit_location = value
-            break
-    if explicit_location and not rooms and not places:
-        place, room = split_place_room(explicit_location)
-        places = unique([place]) if place else []
-        rooms = unique([room]) if room else []
+    title = choose_course_title(event, cfg, lines)
 
-    # Derive course title if CELCAT omitted "module".
-    title = module
-    if not title:
-        useful = []
-        for line in after_group:
-            if line.casefold() == category.casefold():
-                continue
-            if line.casefold() == cfg["group"].casefold():
-                continue
-            useful.append(line)
-        if useful:
-            title = useful[0]
-
-    if not title:
-        title = "Cours UVSQ"
-
-    # Preserve remaining CELCAT information without duplicating structured fields.
+    # Keep extra CELCAT info only in the event details.
     notes = []
-    for line in after_group:
-        if line.casefold() in {
-            category.casefold(),
-            cfg["group"].casefold(),
-            title.casefold(),
-            module.casefold() if module else "",
-        }:
+    for line in lines:
+        if line.casefold() == cfg["group"].casefold():
+            continue
+        if line.casefold() in location_source_lines:
+            continue
+        if looks_like_category(line):
+            continue
+        if strip_course_code(line).casefold() == title.casefold():
             continue
         notes.append(line)
     notes = unique(notes)
 
     place_text = " / ".join(places)
     room_text = " / ".join(rooms)
+
+    # User-facing order: place first, classroom second.
     if place_text and room_text:
         location = f"{place_text} — {room_text}"
     else:
@@ -385,18 +498,20 @@ def event_to_ics_lines(event: dict, cfg: dict, now_utc: dt.datetime) -> tuple[li
     end = parse_celcat_datetime(event.get("end"))
     fields = parse_event_fields(event, cfg)
 
-    summary = f"{fields['type_label']} · {fields['title']}"
+    # IMPORTANT: no TD / TP / COURS prefix. The calendar color carries that info.
+    summary = fields["title"]
     uid = make_uid(event, start, fields["title"])
 
     description_lines = [
-        f"Type : {fields['type_label']}",
         f"Cours : {fields['title']}",
-        f"Groupe : {cfg['group']}",
+        f"Type : {fields['type_label']}",
     ]
     if fields["place"]:
-        description_lines.append(f"Site : {fields['place']}")
+        description_lines.append(f"Lieu : {fields['place']}")
     if fields["room"]:
         description_lines.append(f"Salle : {fields['room']}")
+    description_lines.append(f"Groupe : {cfg['group']}")
+
     if fields["notes"]:
         description_lines.append("")
         description_lines.append("Détails CELCAT :")
@@ -410,11 +525,15 @@ def event_to_ics_lines(event: dict, cfg: dict, now_utc: dt.datetime) -> tuple[li
         dt_local_line("DTEND", end),
         f"SUMMARY:{ics_escape(summary)}",
     ]
+
     if fields["location"]:
         lines.append(f"LOCATION:{ics_escape(fields['location'])}")
+
     lines.append(f"DESCRIPTION:{ics_escape(chr(10).join(description_lines))}")
+
     if fields["category"]:
         lines.append(f"CATEGORIES:{ics_escape(fields['category'])}")
+
     lines.append("END:VEVENT")
     return lines, fields["feed_key"]
 
@@ -467,14 +586,17 @@ def build_calendars(events: list[dict], cfg: dict) -> tuple[dict[str, str], dict
 
     outputs = {}
     counts = {"all": len(all_events)}
+
     for key, meta in FEEDS.items():
         selected = all_events if key == "all" else buckets[key]
         counts[key] = len(selected)
 
         name = cfg["calendar_name"] if key == "all" else meta["name"]
         lines = calendar_header(name, meta["color"])
+
         for ev_lines in selected:
             lines.extend(ev_lines)
+
         lines.append("END:VCALENDAR")
         outputs[key] = "\r\n".join(fold_ics(line) for line in lines) + "\r\n"
 
@@ -502,8 +624,6 @@ def main() -> int:
         events, endpoint = fetch_events(cfg)
         calendars, counts = build_calendars(events, cfg)
 
-        # Protect an existing healthy all-events feed against an obviously
-        # temporary empty response from CELCAT.
         main_path = DOCS / FEEDS["all"]["filename"]
         if counts["all"] == 0 and main_path.exists() and "BEGIN:VEVENT" in main_path.read_text(
             encoding="utf-8", errors="ignore"
@@ -525,6 +645,7 @@ def main() -> int:
         print("Generated calendars:")
         for key, meta in FEEDS.items():
             print(f"  {meta['filename']}: {counts[key]} events")
+
         return 0
 
     except Exception as exc:
