@@ -3,22 +3,55 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>UVSQ timetable feed</title>
+  <title>UVSQ timetable feeds</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 760px; margin: 48px auto; padding: 0 20px; line-height: 1.5; }
-    .card { border: 1px solid #ddd; border-radius: 16px; padding: 22px; }
-    code { background: #f4f4f4; padding: 2px 6px; border-radius: 6px; }
-    .ok { color: #137333; } .bad { color: #b3261e; }
-    a.button { display:inline-block; padding:10px 14px; border:1px solid #aaa; border-radius:10px; text-decoration:none; }
+    :root { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { max-width: 860px; margin: 48px auto; padding: 0 20px; line-height: 1.5; background:#fafafa; color:#202124; }
+    h1 { margin-bottom: 6px; }
+    .muted { color:#5f6368; }
+    .card { background:white; border:1px solid #ddd; border-radius:16px; padding:22px; margin:18px 0; }
+    .feeds { display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); }
+    .feed { border:1px solid #e0e0e0; border-radius:12px; padding:15px; background:#fff; }
+    .dot { width:12px; height:12px; display:inline-block; border-radius:50%; margin-right:8px; }
+    .button { display:inline-block; margin-top:8px; padding:8px 11px; border:1px solid #aaa; border-radius:9px; text-decoration:none; color:inherit; }
+    .ok { color:#137333; } .bad { color:#b3261e; }
+    code { background:#f1f3f4; padding:2px 5px; border-radius:5px; overflow-wrap:anywhere; }
   </style>
 </head>
 <body>
   <h1>UVSQ — S5 PHYSIQUE PSC</h1>
+  <p class="muted">Organized live CELCAT feeds with clean titles and locations.</p>
+
   <div class="card">
-    <p>This page publishes a calendar feed generated from the UVSQ CELCAT group timetable.</p>
-    <p><a class="button" href="schedule.ics">Open / subscribe to schedule.ics</a></p>
+    <h2>Recommended: color-code by class type</h2>
+    <p>Subscribe to the class-type feeds below. In Google Calendar, give each subscribed calendar the matching color once. Google controls subscription colors, so the feed cannot force them reliably.</p>
+    <div class="feeds">
+      <div class="feed"><span class="dot" style="background:#3F51B5"></span><strong>COURS</strong><br><span id="count-cours"></span><br><a class="button" href="cours.ics">cours.ics</a></div>
+      <div class="feed"><span class="dot" style="background:#039BE5"></span><strong>TD</strong><br><span id="count-td"></span><br><a class="button" href="td.ics">td.ics</a></div>
+      <div class="feed"><span class="dot" style="background:#0B8043"></span><strong>TP</strong><br><span id="count-tp"></span><br><a class="button" href="tp.ics">tp.ics</a></div>
+      <div class="feed"><span class="dot" style="background:#D50000"></span><strong>EXAMS / TESTS</strong><br><span id="count-examens"></span><br><a class="button" href="examens.ics">examens.ics</a></div>
+      <div class="feed"><span class="dot" style="background:#616161"></span><strong>OTHER</strong><br><span id="count-autres"></span><br><a class="button" href="autres.ics">autres.ics</a></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>All-in-one feed</h2>
+    <p>If you prefer a single calendar, keep using this. It contains the same organized event names and locations, but Google Calendar will use one color for the whole calendar.</p>
+    <a class="button" href="schedule.ics">schedule.ics</a>
+  </div>
+
+  <div class="card">
+    <h2>What an event now looks like</h2>
+    <p><strong>Title:</strong> <code>TD · Mécanique quantique</code></p>
+    <p><strong>Location:</strong> <code>Versailles / Bâtiment … — Salle …</code></p>
+    <p><strong>Details:</strong> Type, course, group, site and room are written on separate lines.</p>
+  </div>
+
+  <div class="card">
+    <h2>Status</h2>
     <p id="status">Checking latest update…</p>
   </div>
+
   <script>
     fetch('status.json', {cache:'no-store'})
       .then(r => r.json())
@@ -26,7 +59,12 @@
         const when = new Date(s.updated_at).toLocaleString();
         document.querySelector('#status').innerHTML =
           `<strong class="${s.ok ? 'ok' : 'bad'}">${s.ok ? 'Feed healthy' : 'Update failed'}</strong><br>` +
-          `Last run: ${when}<br>Events: ${s.event_count}<br>${s.message}`;
+          `Last run: ${when}<br>Total events: ${s.event_count}<br>${s.message}`;
+        const c = s.category_counts || {};
+        for (const key of ['cours','td','tp','examens','autres']) {
+          const el = document.querySelector('#count-' + key);
+          if (el) el.textContent = `${c[key] || 0} events`;
+        }
       })
       .catch(() => document.querySelector('#status').textContent = 'No status available yet.');
   </script>
