@@ -339,16 +339,65 @@ def candidate_score(line: str) -> int:
     return score
 
 
+
+def iter_event_strings(value, path=""):
+    """
+    Recursively yield (path, string) pairs from the entire CELCAT event object.
+    Some CELCAT deployments hide the real course label in non-obvious nested
+    properties, so this gives the title picker a broader fallback.
+    """
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            yield from iter_event_strings(child, child_path)
+    elif isinstance(value, (list, tuple)):
+        for i, child in enumerate(value):
+            child_path = f"{path}[{i}]"
+            yield from iter_event_strings(child, child_path)
+    elif isinstance(value, str):
+        s = clean_html(value)
+        if s:
+            for line in s.splitlines():
+                line = line.strip()
+                if line:
+                    yield path, line
+
+
+def looks_like_non_course_metadata(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return True
+
+    # URLs, colors, date/time values, booleans, IDs, CSS-ish values.
+    if re.match(r"^(https?://|#[0-9A-Fa-f]{3,8}$)", s):
+        return True
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ].*)?", s):
+        return True
+    if re.fullmatch(r"(true|false|null|\d+)", s, re.I):
+        return True
+
+    # Very short opaque resource codes.
+    compact = re.sub(r"[\s._-]", "", s)
+    if len(compact) <= 12 and re.fullmatch(r"[A-Z]{1,6}\d+[A-Z0-9]*", compact):
+        return True
+
+    return False
+
 def choose_course_title(event: dict, cfg: dict, lines: list[str]) -> str:
     """
-    Prefer structured CELCAT course fields, but only when they are not actually
-    room resources. Then fall back to description lines after removing group,
-    category and location data.
-    """
-    candidates: list[tuple[int, str]] = []
+    Find the actual course name.
 
-    # Different CELCAT deployments use different field names.
-    structured_fields = (
+    Strategy:
+      1. Prefer known subject/course fields.
+      2. Search description lines.
+      3. Search every remaining string anywhere in the CELCAT event object.
+
+    Group labels, rooms, buildings, categories, IDs, dates and technical
+    metadata are excluded before ranking.
+    """
+    candidates: list[tuple[int, str, str]] = []
+
+    preferred_keys = (
         "subject",
         "subjectName",
         "course",
@@ -359,58 +408,100 @@ def choose_course_title(event: dict, cfg: dict, lines: list[str]) -> str:
         "module",
         "title",
         "name",
+        "label",
+        "descriptionText",
     )
 
-    for idx, key in enumerate(structured_fields):
-        value = clean_html(event.get(key, ""))
-        if not value:
-            continue
-        if "\n" in value:
-            values = value.splitlines()
-        else:
-            values = [value]
-
-        for item in values:
-            item = item.strip()
-            if not item:
-                continue
-            if item.casefold() == cfg["group"].casefold():
-                continue
-            if looks_like_group_name(item, cfg):
-                continue
-            if looks_like_category(item):
-                continue
-            if parse_uvsq_location(item):
-                continue
-            cleaned = strip_course_code(item)
-            if looks_like_group_name(cleaned, cfg):
-                continue
-            # Structured fields get a large preference.
-            candidates.append((100 - idx + candidate_score(cleaned), cleaned))
-
-    # Description fallback.
-    for item in lines:
-        item = item.strip()
+    def add_candidate(raw: str, base_score: int, source: str):
+        item = clean_html(raw).strip()
         if not item:
-            continue
+            return
         if item.casefold() == cfg["group"].casefold():
-            continue
+            return
         if looks_like_group_name(item, cfg):
-            continue
+            return
         if looks_like_category(item):
-            continue
+            return
         if parse_uvsq_location(item):
-            continue
+            return
+        if looks_like_non_course_metadata(item):
+            return
+
         cleaned = strip_course_code(item)
+        if not cleaned:
+            return
         if looks_like_group_name(cleaned, cfg):
-            continue
-        candidates.append((candidate_score(cleaned), cleaned))
+            return
+        if looks_like_category(cleaned):
+            return
+        if parse_uvsq_location(cleaned):
+            return
+        if looks_like_non_course_metadata(cleaned):
+            return
+
+        score = base_score + candidate_score(cleaned)
+
+        # Course names usually have lowercase letters; group/resource labels
+        # are often mostly uppercase. Give mixed-case names a small boost.
+        if any(ch.islower() for ch in cleaned) and any(ch.isupper() for ch in cleaned):
+            score += 3
+
+        # Avoid obvious person-name-like strings.
+        words = re.findall(r"[A-Za-zÀ-ÿ]+", cleaned)
+        if len(words) <= 2 and cleaned.isupper():
+            score -= 2
+
+        candidates.append((score, cleaned, source))
+
+    # 1. Preferred structured fields.
+    for idx, key in enumerate(preferred_keys):
+        value = event.get(key, "")
+        if isinstance(value, str):
+            for item in clean_html(value).splitlines():
+                add_candidate(item, 120 - idx, f"field:{key}")
+
+    # 2. Human-readable description.
+    for item in lines:
+        add_candidate(item, 60, "description")
+
+    # 3. Broad recursive fallback through the entire event payload.
+    # Penalize technical-looking keys, reward semantic-looking ones.
+    for path, item in iter_event_strings(event):
+        p = path.lower()
+
+        if any(
+            bad in p
+            for bad in (
+                "start", "end", "date", "time", "color", "colour",
+                "background", "border", "url", "id", "guid", "resourceid",
+            )
+        ):
+            base = 0
+        elif any(
+            good in p
+            for good in (
+                "subject", "course", "module", "activity", "event",
+                "label", "name", "description", "text",
+            )
+        ):
+            base = 45
+        else:
+            base = 20
+
+        add_candidate(item, base, f"recursive:{path}")
 
     if not candidates:
         return "Cours UVSQ"
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    return strip_course_code(candidates[0][1])
+    # De-duplicate by cleaned title, keeping the strongest score.
+    best_by_title = {}
+    for score, title, source in candidates:
+        key = title.casefold()
+        if key not in best_by_title or score > best_by_title[key][0]:
+            best_by_title[key] = (score, title, source)
+
+    ranked = sorted(best_by_title.values(), key=lambda x: x[0], reverse=True)
+    return ranked[0][1]
 
 
 def unique(items: list[str]) -> list[str]:
