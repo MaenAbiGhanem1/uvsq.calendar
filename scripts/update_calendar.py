@@ -238,16 +238,16 @@ def looks_like_category(line: str) -> bool:
 
 def strip_course_code(line: str) -> str:
     """
-    Clean common UVSQ course-code decorations.
+    Clean UVSQ course-code decorations.
 
     Examples:
-      "PHY301 - Mécanique quantique" -> "Mécanique quantique"
-      "LSPH513N-LSPH513 - Optique Physique" -> "Optique Physique"
       "Mécanique quantique 1 [LSPH516]" -> "Mécanique quantique 1"
+      "LSPH513N-LSPH513 - Optique Physique" -> "Optique Physique"
+      "LSME514-Thermique [LSME514]" -> "Thermique"
     """
     s = line.strip()
 
-    # Remove trailing bracketed course codes such as [LSPH516].
+    # Remove trailing bracketed module code, e.g. [LSME514].
     s = re.sub(
         r"\s*\[[A-Z]{2,}[A-Z0-9._-]*\d[A-Z0-9._-]*\]\s*$",
         "",
@@ -255,21 +255,20 @@ def strip_course_code(line: str) -> str:
         flags=re.I,
     ).strip()
 
-    # Remove leading UVSQ module codes, including compound codes.
-    if " - " in s:
-        left, right = s.split(" - ", 1)
-        compact = re.sub(r"[\s._-]", "", left)
-
-        if (
-            2 <= len(compact) <= 30
-            and re.fullmatch(r"[A-Za-z0-9]+", compact)
-            and any(ch.isdigit() for ch in compact)
-            and len(right.strip()) >= 3
-        ):
-            s = right.strip()
+    # Strip one or more leading module codes.
+    # Handles:
+    #   LSME514-Thermique
+    #   LSPH513N-LSPH513 - Optique Physique
+    m = re.match(
+        r"^(?:[A-Z]{2,}\d+[A-Z0-9]*)(?:-[A-Z]{2,}\d+[A-Z0-9]*)*"
+        r"\s*[-–—]\s*(.+)$",
+        s,
+        flags=re.I,
+    )
+    if m and len(m.group(1).strip()) >= 3:
+        s = m.group(1).strip()
 
     return s
-
 
 def looks_like_group_name(line: str, cfg: dict) -> bool:
     """
