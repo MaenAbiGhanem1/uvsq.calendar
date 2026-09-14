@@ -238,27 +238,67 @@ def looks_like_category(line: str) -> bool:
 
 def strip_course_code(line: str) -> str:
     """
-    Turn e.g. "PHY301 - Mécanique quantique" into "Mécanique quantique",
-    while leaving ordinary names untouched.
+    Clean common UVSQ course-code decorations.
+
+    Examples:
+      "PHY301 - Mécanique quantique" -> "Mécanique quantique"
+      "LSPH513N-LSPH513 - Optique Physique" -> "Optique Physique"
+      "Mécanique quantique 1 [LSPH516]" -> "Mécanique quantique 1"
     """
     s = line.strip()
-    if " - " not in s:
-        return s
 
-    left, right = s.split(" - ", 1)
-    compact = re.sub(r"[\s._-]", "", left)
+    # Remove trailing bracketed course codes such as [LSPH516].
+    s = re.sub(
+        r"\s*\[[A-Z]{2,}[A-Z0-9._-]*\d[A-Z0-9._-]*\]\s*$",
+        "",
+        s,
+        flags=re.I,
+    ).strip()
 
-    # Course codes tend to be short alphanumeric identifiers.
-    if (
-        2 <= len(compact) <= 14
-        and re.fullmatch(r"[A-Za-z0-9]+", compact)
-        and any(ch.isdigit() for ch in compact)
-        and len(right.strip()) >= 4
-    ):
-        return right.strip()
+    # Remove leading UVSQ module codes, including compound codes.
+    if " - " in s:
+        left, right = s.split(" - ", 1)
+        compact = re.sub(r"[\s._-]", "", left)
+
+        if (
+            2 <= len(compact) <= 30
+            and re.fullmatch(r"[A-Za-z0-9]+", compact)
+            and any(ch.isdigit() for ch in compact)
+            and len(right.strip()) >= 3
+        ):
+            s = right.strip()
 
     return s
 
+
+def looks_like_group_name(line: str, cfg: dict) -> bool:
+    """
+    Reject CELCAT group/resource labels that can otherwise be mistaken
+    for the subject name.
+    """
+    s = clean_html(line)
+    u = ascii_upper(s)
+    group_u = ascii_upper(cfg["group"])
+
+    if not s:
+        return True
+    if u == group_u:
+        return True
+
+    # Example actually seen:
+    # "L3 Physique S5 ( S5 PHYSIQUE ) [S5 PHYSIQUE ]"
+    if "S5 PHYSIQUE" in u and (
+        "L3 PHYSIQUE" in u
+        or "[" in s
+        or "(" in s
+        or "PSC" in u
+    ):
+        return True
+
+    if re.search(r"\b(GROUPE|PROMO|PARCOURS|SEMESTRE)\b", u):
+        return True
+
+    return False
 
 def candidate_score(line: str) -> int:
     """
@@ -336,12 +376,17 @@ def choose_course_title(event: dict, cfg: dict, lines: list[str]) -> str:
                 continue
             if item.casefold() == cfg["group"].casefold():
                 continue
+            if looks_like_group_name(item, cfg):
+                continue
             if looks_like_category(item):
                 continue
             if parse_uvsq_location(item):
                 continue
+            cleaned = strip_course_code(item)
+            if looks_like_group_name(cleaned, cfg):
+                continue
             # Structured fields get a large preference.
-            candidates.append((100 - idx + candidate_score(item), item))
+            candidates.append((100 - idx + candidate_score(cleaned), cleaned))
 
     # Description fallback.
     for item in lines:
@@ -350,11 +395,16 @@ def choose_course_title(event: dict, cfg: dict, lines: list[str]) -> str:
             continue
         if item.casefold() == cfg["group"].casefold():
             continue
+        if looks_like_group_name(item, cfg):
+            continue
         if looks_like_category(item):
             continue
         if parse_uvsq_location(item):
             continue
-        candidates.append((candidate_score(item), item))
+        cleaned = strip_course_code(item)
+        if looks_like_group_name(cleaned, cfg):
+            continue
+        candidates.append((candidate_score(cleaned), cleaned))
 
     if not candidates:
         return "Cours UVSQ"
@@ -417,6 +467,8 @@ def parse_event_fields(event: dict, cfg: dict) -> dict:
     notes = []
     for line in lines:
         if line.casefold() == cfg["group"].casefold():
+            continue
+        if looks_like_group_name(line, cfg):
             continue
         if line.casefold() in location_source_lines:
             continue
